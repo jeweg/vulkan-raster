@@ -93,10 +93,6 @@ Device::Device(vk::Instance instance, vk::PhysicalDevice physical_device, VkSurf
         vk::DeviceCreateInfo{}.setPEnabledExtensionNames(device_extensions).setQueueCreateInfos(device_queue_cis));
 
     init_vma(instance);
-    _general_command_pool =
-        _device->createCommandPoolUnique(vk::CommandPoolCreateInfo{}
-                                             .setQueueFamilyIndex(get_family_index(Queue::Graphics))
-                                             .setFlags(vk::CommandPoolCreateFlagBits::eResetCommandBuffer));
 
     _framebuffer_cache = std::make_unique<FramebufferCache>(*this, 10);
 }
@@ -238,6 +234,11 @@ vk::Queue Device::get_queue(Queue queue) const
 
 void Device::run_commands(Queue queue, std::function<void(vk::CommandBuffer)> body)
 {
+    vk::UniqueCommandPool _general_command_pool =
+        _device->createCommandPoolUnique(vk::CommandPoolCreateInfo{}
+                                             .setQueueFamilyIndex(get_family_index(queue))
+                                             .setFlags(vk::CommandPoolCreateFlagBits::eResetCommandBuffer));
+
     auto cbs = _device->allocateCommandBuffersUnique(
         vk::CommandBufferAllocateInfo{}.setCommandPool(_general_command_pool.get()).setCommandBufferCount(1));
     ASSUME(cbs.size() == 1);
@@ -251,7 +252,7 @@ void Device::run_commands(Queue queue, std::function<void(vk::CommandBuffer)> bo
     get_queue(queue).submit({submit_info}, {});
 
     // TODO: we might want to support this using fences. And also make it optional?
-    _device->waitIdle();
+    get_queue(queue).waitIdle();
 }
 
 

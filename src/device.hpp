@@ -64,7 +64,7 @@ private:
     vk::Instance _instance;
     vk::PhysicalDevice _physical_device;
     vk::UniqueDevice _device;
-    vk::UniqueCommandPool _general_command_pool;
+    // vk::UniqueCommandPool _general_command_pool;
 
     VmaAllocator _vma_allocator = VK_NULL_HANDLE;
 

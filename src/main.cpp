@@ -239,23 +239,48 @@ int main()
 
         VmaBuffer vertex_buffer = std::move(VmaBuffer(
             device.get_vma_allocator(),
-            VmaMemoryUsage::VMA_MEMORY_USAGE_CPU_TO_GPU,
-            true, // Automatically persistently mapped
+            VmaMemoryUsage::VMA_MEMORY_USAGE_GPU_ONLY,
+            false,
             vk::BufferCreateInfo{}
-                .setUsage(vk::BufferUsageFlagBits::eVertexBuffer)
+                .setUsage(vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eTransferDst)
                 .setSharingMode(vk::SharingMode::eExclusive)
                 .setSize(vertices.size() * sizeof(Vertex))));
-        std::memcpy(vertex_buffer.mapped_data(), vertices.data(), vertices.size() * sizeof(Vertex));
 
         VmaBuffer index_buffer = std::move(VmaBuffer(
             device.get_vma_allocator(),
-            VmaMemoryUsage::VMA_MEMORY_USAGE_CPU_TO_GPU,
-            true, // Automatically persistently mapped
+            VmaMemoryUsage::VMA_MEMORY_USAGE_GPU_ONLY,
+            false,
             vk::BufferCreateInfo{}
-                .setUsage(vk::BufferUsageFlagBits::eIndexBuffer)
+                .setUsage(vk::BufferUsageFlagBits::eIndexBuffer | vk::BufferUsageFlagBits::eTransferDst)
                 .setSharingMode(vk::SharingMode::eExclusive)
                 .setSize(indices.size() * sizeof(uint32_t))));
-        std::memcpy(index_buffer.mapped_data(), indices.data(), indices.size() * sizeof(uint32_t));
+
+        //----------------------------------------------------------------------
+        // Upload to vertex and index buffers
+
+        {
+            const size_t vertex_bytes = vertices.size() * sizeof(Vertex);
+            const size_t index_bytes = indices.size() * sizeof(uint32_t);
+
+            VmaBuffer staging_buffer = std::move(VmaBuffer(
+                device.get_vma_allocator(),
+                VmaMemoryUsage::VMA_MEMORY_USAGE_CPU_TO_GPU,
+                true, // Automatically persistently mapped
+                vk::BufferCreateInfo{}
+                    .setUsage(vk::BufferUsageFlagBits::eTransferSrc)
+                    .setSharingMode(vk::SharingMode::eExclusive)
+                    .setSize(vertex_bytes + index_bytes)));
+            std::memcpy(static_cast<char *>(staging_buffer.mapped_data()) + 0, vertices.data(), vertex_bytes);
+            std::memcpy(static_cast<char *>(staging_buffer.mapped_data()) + vertex_bytes, indices.data(), index_bytes);
+
+            device.run_commands(Device::Queue::AsyncTransfer, [&](vk::CommandBuffer cmdbuf) {
+                std::array<vk::BufferCopy, 2> copies = {
+                    vk::BufferCopy{}.setSrcOffset(0).setDstOffset(0).setSize(vertex_bytes),
+                    vk::BufferCopy{}.setSrcOffset(vertex_bytes).setDstOffset(0).setSize(index_bytes)};
+                cmdbuf.copyBuffer(staging_buffer, vertex_buffer, 1, &copies[0]);
+                cmdbuf.copyBuffer(staging_buffer, index_buffer, 1, &copies[1]);
+            });
+        }
 
         //----------------------------------------------------------------------
         // Pipeline
