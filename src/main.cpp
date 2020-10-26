@@ -319,13 +319,12 @@ int main()
                     vk::AttachmentDescription{}
                         .setFormat(window.get_swap_chain().get_format())
                         .setSamples(vk::SampleCountFlagBits::e1)
-                        .setLoadOp(vk::AttachmentLoadOp::eDontCare)
-                        //.setLoadOp(vk::AttachmentLoadOp::eClear)
+                        .setLoadOp(vk::AttachmentLoadOp::eClear)
                         .setStoreOp(vk::AttachmentStoreOp::eStore)
                         .setStencilLoadOp(vk::AttachmentLoadOp::eDontCare)
                         .setStencilStoreOp(vk::AttachmentStoreOp::eDontCare)
                         .setInitialLayout(vk::ImageLayout::eUndefined)
-                        //.setInitialLayout(vk::ImageLayout::eColorAttachmentOptimal)
+                        //.setInitialLayout(vk::ImageLayout::eColorAttachmentOptimal)  // TODO
                         .setFinalLayout(vk::ImageLayout::ePresentSrcKHR),
                     vk::AttachmentDescription{}
                         .setFormat(vk::Format::eD24UnormS8Uint) // TODO: richer image class to query this automatically
@@ -337,16 +336,17 @@ int main()
                         .setInitialLayout(vk::ImageLayout::eUndefined)
                         .setFinalLayout(vk::ImageLayout::eDepthStencilAttachmentOptimal)};
 
+                std::array<vk::AttachmentReference, 1> color_ar = {
+                    vk::AttachmentReference{}.setAttachment(0).setLayout(vk::ImageLayout::eColorAttachmentOptimal)};
 
-                auto ar = vk::AttachmentReference{}.setAttachment(1).setLayout(
+                auto depth_ar = vk::AttachmentReference{}.setAttachment(1).setLayout(
                     vk::ImageLayout::eDepthStencilAttachmentOptimal);
 
                 std::array<vk::SubpassDescription, 1> subpass_desc = {
                     vk::SubpassDescription{}
                         .setPipelineBindPoint(vk::PipelineBindPoint::eGraphics)
-                        .setColorAttachments(vk::AttachmentReference{}.setAttachment(0).setLayout(
-                            vk::ImageLayout::eColorAttachmentOptimal))
-                        .setPDepthStencilAttachment(&ar)};
+                        .setColorAttachments(color_ar)
+                        .setPDepthStencilAttachment(&depth_ar)};
 
                 // Barrier around depth buffer usage -- otherwise multiple frames in flight
                 // could access it at the same time. See https://stackoverflow.com/a/62398311
