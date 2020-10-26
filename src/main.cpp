@@ -14,6 +14,10 @@
 #define TINYOBJLOADER_IMPLEMENTATION
 #include "tiny_obj_loader.h"
 
+#define GLM_SWIZZLE_XYZW
+#include "glm/glm.hpp"
+#include "glm/gtc/matrix_transform.hpp"
+
 #include <iostream>
 #include <chrono>
 
@@ -43,6 +47,72 @@ void glfwErrorCallback(int error, const char *description)
 
 int main()
 {
+    auto t0 = std::chrono::high_resolution_clock::now();
+
+    const char *inputfile = "C:/Users/jensw/Downloads/Interior/interior.obj";
+    const char *mtl_basedir = "C:/Users/jensw/Downloads/Interior/";
+    tinyobj::attrib_t attrib;
+    std::vector<tinyobj::shape_t> shapes;
+    std::vector<tinyobj::material_t> materials;
+    std::string warn;
+    std::string err;
+    constexpr bool triangulate = true;
+    bool ret = tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, inputfile, mtl_basedir, triangulate);
+
+    if (!warn.empty()) { std::cerr << "Warning: " << warn << "\n"; }
+    if (!err.empty()) { std::cerr << "Error: " << warn << "\n"; }
+    if (!ret) { return -1; }
+
+    auto t1 = std::chrono::high_resolution_clock::now();
+    std::cout << "Success! This took " << std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count()
+              << " us\n";
+
+
+    std::cout << shapes.size() << "\n";
+    std::cout << materials.size() << "\n";
+
+    size_t nl = 0;
+    size_t np = 0;
+    size_t nv = 0;
+    size_t onv = 0;
+    for (auto &shape : shapes) {
+        nl = std::max(shape.lines.num_line_vertices.size(), nl);
+        np = std::max(shape.points.indices.size(), np);
+        nv = std::max(shape.mesh.num_face_vertices.size(), nv);
+        onv += shape.mesh.num_face_vertices.size();
+    }
+
+    struct Vertex
+    {
+        glm::vec3 pos;
+    };
+
+    std::vector<Vertex> vertices;
+    vertices.resize(10000);
+    uint32_t max_vi = 0;
+    std::vector<uint32_t> indices;
+    glm::vec3 vertices_bbox_min(std::numeric_limits<float>::max());
+    glm::vec3 vertices_bbox_max(std::numeric_limits<float>::lowest());
+    indices.reserve(vertices.size() * 3);
+    for (const auto &shape : shapes) {
+        for (const auto &i : shape.mesh.indices) {
+            uint32_t vi = i.vertex_index;
+            indices.push_back(vi);
+            Vertex vertex;
+            vertex.pos =
+                glm::vec3(attrib.vertices[vi * 3 + 0], attrib.vertices[vi * 3 + 1], attrib.vertices[vi * 3 + 2]);
+
+            vertices_bbox_min = glm::min(vertices_bbox_min, vertex.pos);
+            vertices_bbox_max = glm::max(vertices_bbox_min, vertex.pos);
+
+            if (vi >= vertices.size()) { vertices.resize(vertices.size() * 3 / 2); }
+            max_vi = std::max(max_vi, vi);
+            vertices[vi] = std::move(vertex);
+        }
+    }
+    vertices.resize(max_vi + 1);
+
+
     try {
         //----------------------------------------------------------------------
         // Vulkan instance
@@ -138,7 +208,8 @@ int main()
             "VK_KHR_swapchain", "VK_KHR_get_memory_requirements2", "VK_KHR_dedicated_allocation"};
 
         Device device(instance.get(), phys_device, window.get_surface());
-        window.make_swap_chain(device, true, true);
+        // window.make_swap_chain(device, true, true);
+        window.make_swap_chain(device, false, false); // Pretty much immediate present
 
         //----------------------------------------------------------------------
         // Static resources (not dependent on window size)
@@ -153,7 +224,38 @@ int main()
                     vk::DescriptorPoolSize{}.setType(vk::DescriptorType::eStorageImage).setDescriptorCount(100),
                     vk::DescriptorPoolSize{}.setType(vk::DescriptorType::eUniformBuffer).setDescriptorCount(100)}));
 
-        vk::UniqueSampler image_sampler = device.get().createSamplerUnique(vk::SamplerCreateInfo{});
+        // vk::UniqueSampler image_sampler = device.get().createSamplerUnique(vk::SamplerCreateInfo{});
+
+        vk::UniqueShaderModule vertex_shader =
+            load_shader(device.get(), std::string(build_info::PROJECT_BINARY_DIR) + "/shaders/vs.vert.spirv");
+        vk::UniqueShaderModule fragment_shader =
+            load_shader(device.get(), std::string(build_info::PROJECT_BINARY_DIR) + "/shaders/fs.frag.spirv");
+
+        //----------------------------------------------------------------------
+        // Vertex and index buffer
+
+        VmaBuffer vertex_buffer = std::move(VmaBuffer(
+            device.get_vma_allocator(),
+            VmaMemoryUsage::VMA_MEMORY_USAGE_CPU_TO_GPU,
+            true, // Automatically persistently mapped
+            vk::BufferCreateInfo{}
+                .setUsage(vk::BufferUsageFlagBits::eVertexBuffer)
+                .setSharingMode(vk::SharingMode::eExclusive)
+                .setSize(vertices.size() * sizeof(Vertex))));
+        std::memcpy(vertex_buffer.mapped_data(), vertices.data(), vertices.size() * sizeof(Vertex));
+
+        VmaBuffer index_buffer = std::move(VmaBuffer(
+            device.get_vma_allocator(),
+            VmaMemoryUsage::VMA_MEMORY_USAGE_CPU_TO_GPU,
+            true, // Automatically persistently mapped
+            vk::BufferCreateInfo{}
+                .setUsage(vk::BufferUsageFlagBits::eIndexBuffer)
+                .setSharingMode(vk::SharingMode::eExclusive)
+                .setSize(indices.size() * sizeof(uint32_t))));
+        std::memcpy(index_buffer.mapped_data(), indices.data(), indices.size() * sizeof(uint32_t));
+
+        //----------------------------------------------------------------------
+        // Pipeline
 
         struct GraphicsPipeline
         {
@@ -161,9 +263,15 @@ int main()
             vk::UniquePipelineLayout layout;
             vk::UniqueRenderPass render_pass;
             vk::UniqueDescriptorSetLayout dsl;
-            vk::UniqueDescriptorSet ds;
-        } graphics_pipeline;
 
+            struct PushConstants
+            {
+                alignas(16) glm::mat4 mvp = glm::mat4(1);
+            } push_constants;
+
+            VmaImage depth_buffer;
+
+        } graphics_pipeline;
 
         auto update_size_dependent_resource = [&](const vk::Extent2D &extent) {
             static vk::Extent2D last_extent;
@@ -174,31 +282,31 @@ int main()
             }
             last_extent = extent;
 
-            constexpr vk::Format IMAGE_FORMAT = vk::Format::eR32G32B32A32Sfloat;
-
             {
-                graphics_pipeline.dsl =
-                    device.get().createDescriptorSetLayoutUnique(vk::DescriptorSetLayoutCreateInfo{}.setBindings(
-                        vk::DescriptorSetLayoutBinding{}
-                            .setBinding(0)
-                            .setDescriptorType(vk::DescriptorType::eCombinedImageSampler)
-                            .setDescriptorCount(1)
-                            .setStageFlags(vk::ShaderStageFlagBits::eFragment)));
-
-                graphics_pipeline.layout = device.get().createPipelineLayoutUnique(
-                    vk::PipelineLayoutCreateInfo{}.setSetLayouts(graphics_pipeline.dsl.get()));
-
-                vk::UniqueShaderModule vertex_shader =
-                    load_shader(device.get(), std::string(build_info::PROJECT_BINARY_DIR) + "/shaders/vs.vert.spirv");
-                vk::UniqueShaderModule fragment_shader =
-                    load_shader(device.get(), std::string(build_info::PROJECT_BINARY_DIR) + "/shaders/fs.frag.spirv");
+                // TODO: better logic to find the best supported depth format (see
+                // https://vulkan-tutorial.com/Depth_buffering)
+                graphics_pipeline.depth_buffer = VmaImage(
+                    device.get_vma_allocator(),
+                    VMA_MEMORY_USAGE_GPU_ONLY,
+                    vk::ImageCreateInfo{}
+                        .setImageType(vk::ImageType::e2D)
+                        .setExtent(vk::Extent3D(window.get_extent(), 1))
+                        .setMipLevels(1)
+                        .setArrayLayers(1)
+                        .setFormat(vk::Format::eD24UnormS8Uint)
+                        .setTiling(vk::ImageTiling::eOptimal)
+                        .setInitialLayout(vk::ImageLayout::eUndefined)
+                        .setUsage(vk::ImageUsageFlagBits::eDepthStencilAttachment)
+                        .setSamples(vk::SampleCountFlagBits::e1)
+                        .setSharingMode(vk::SharingMode::eExclusive));
 
                 graphics_pipeline.render_pass = device.get().createRenderPassUnique(
                     vk::RenderPassCreateInfo{}
                         .setAttachments(vk::AttachmentDescription{}
                                             .setFormat(window.get_swap_chain().get_format())
                                             .setSamples(vk::SampleCountFlagBits::e1)
-                                            .setLoadOp(vk::AttachmentLoadOp::eDontCare)
+                                            .setLoadOp(vk::AttachmentLoadOp::eClear)
+                                            //.setLoadOp(vk::AttachmentLoadOp::eDontCare)
                                             .setStoreOp(vk::AttachmentStoreOp::eStore)
                                             .setStencilLoadOp(vk::AttachmentLoadOp::eDontCare)
                                             .setStencilStoreOp(vk::AttachmentStoreOp::eDontCare)
@@ -218,7 +326,22 @@ int main()
                         .setStage(vk::ShaderStageFlagBits::eFragment)
                         .setModule(fragment_shader.get())
                         .setPName("main")};
-                auto vertex_input_state = vk::PipelineVertexInputStateCreateInfo{};
+
+                auto vibd = vk::VertexInputBindingDescription{}
+                                .setBinding(0)
+                                .setStride(sizeof(Vertex))
+                                .setInputRate(vk::VertexInputRate::eVertex);
+
+                auto viad = vk::VertexInputAttributeDescription{}
+                                .setBinding(0)
+                                .setLocation(0)
+                                .setFormat(vk::Format::eR32G32B32Sfloat)
+                                .setOffset(offsetof(Vertex, pos));
+
+                auto vertex_input_state = vk::PipelineVertexInputStateCreateInfo{}
+                                              .setVertexBindingDescriptions({1, &vibd})
+                                              .setVertexAttributeDescriptions({1, &viad});
+
                 auto input_assembly_state = vk::PipelineInputAssemblyStateCreateInfo{}
                                                 .setTopology(vk::PrimitiveTopology::eTriangleList)
                                                 .setPrimitiveRestartEnable(false);
@@ -242,9 +365,10 @@ int main()
                 auto multisample_state = vk::PipelineMultisampleStateCreateInfo{}
                                              .setRasterizationSamples(vk::SampleCountFlagBits::e1)
                                              .setSampleShadingEnable(false);
-                auto depth_stencil_state = vk::PipelineDepthStencilStateCreateInfo{}
-                                               .setDepthTestEnable(true)
-                                               .setDepthWriteEnable(true)
+                auto depth_stencil_state = vk::PipelineDepthStencilStateCreateInfo{} //.setDepthTestEnable(true)
+                                                                                     //.setDepthWriteEnable(true)
+                                               .setDepthTestEnable(false) // HACK
+                                               .setDepthWriteEnable(false) // HACK
                                                .setDepthCompareOp(vk::CompareOp::eLessOrEqual)
                                                .setBack(vk::StencilOpState{}
                                                             .setFailOp(vk::StencilOp::eKeep)
@@ -260,6 +384,17 @@ int main()
                     | vk::ColorComponentFlagBits::eA);
                 auto color_blend_state = vk::PipelineColorBlendStateCreateInfo{}.setAttachments(cbas);
 
+                graphics_pipeline.dsl =
+                    device.get().createDescriptorSetLayoutUnique(vk::DescriptorSetLayoutCreateInfo{});
+
+                graphics_pipeline.layout = device.get().createPipelineLayoutUnique(
+                    vk::PipelineLayoutCreateInfo{}
+                        .setPushConstantRanges(vk::PushConstantRange{}
+                                                   .setOffset(0)
+                                                   .setSize(sizeof(GraphicsPipeline::PushConstants))
+                                                   .setStageFlags(vk::ShaderStageFlagBits::eVertex))
+                        .setSetLayouts(graphics_pipeline.dsl.get()));
+
                 graphics_pipeline.pipeline = device.get().createGraphicsPipelineUnique(
                     pipeline_cache.get(),
                     vk::GraphicsPipelineCreateInfo{}
@@ -274,37 +409,6 @@ int main()
                         .setPMultisampleState(&multisample_state)
                         .setPDepthStencilState(&depth_stencil_state)
                         .setPColorBlendState(&color_blend_state));
-
-                std::vector<vk::UniqueDescriptorSet> descriptor_sets =
-                    device.get().allocateDescriptorSetsUnique(vk::DescriptorSetAllocateInfo{}
-                                                                  .setDescriptorPool(descriptor_pool.get())
-                                                                  .setDescriptorSetCount(1)
-                                                                  .setSetLayouts(graphics_pipeline.dsl.get()));
-                graphics_pipeline.ds = std::move(descriptor_sets.front());
-
-                /*
-                device.get().updateDescriptorSets(
-                    vk::WriteDescriptorSet{}
-                        .setDstSet(graphics_pipeline.ds.get())
-                        .setDescriptorType(vk::DescriptorType::eCombinedImageSampler)
-                        .setDstBinding(0)
-                        .setDescriptorCount(1)
-                        .setImageInfo(vk::DescriptorImageInfo{}
-                                          .setImageLayout(vk::ImageLayout::eGeneral)
-                                          .setImageView(image_view.get())
-                                          .setSampler(image_sampler.get())),
-                    {});
-                    */
-
-                /*
-                gui_handler.init(
-                    instance.get(),
-                    device,
-                    window,
-                    descriptor_pool.get(),
-                    pipeline_cache.get(),
-                    graphics_pipeline.render_pass.get());
-                    */
 
                 return true;
             }
@@ -334,17 +438,34 @@ int main()
                     vk::RenderPassBeginInfo{}
                         .setRenderPass(graphics_pipeline.render_pass.get())
                         .setRenderArea(vk::Rect2D({0, 0}, window.get_extent()))
-                        .setClearValues(vk::ClearValue{}.setColor(vk::ClearColorValue{}.setFloat32({0, 1, 0, 0})))
+                        .setClearValues(vk::ClearValue{}
+                                            .setColor(vk::ClearColorValue{}.setFloat32({0.5, 1, 0, 1}))
+                                            .setDepthStencil(vk::ClearDepthStencilValue{}.setDepth((1.0))))
                         .setFramebuffer(device.get_framebuffer(fb_key)),
                     vk::SubpassContents::eInline);
 
+#if 0
+                // We do this as part of the render pass begin, but here is manual clearing for completeness.
+                auto ca = vk::ClearAttachment{}
+                              .setClearValue(vk::ClearValue{}.setColor(vk::ClearColorValue{}.setFloat32({0, 0, 1, 1})))
+                              .setColorAttachment(0)
+                              .setAspectMask(vk::ImageAspectFlagBits::eColor);
+                auto cr = vk::ClearRect{}.setBaseArrayLayer(0).setLayerCount(1).setRect(
+                    vk::Rect2D({0, 0}, window.get_extent()));
+                cmd_buffer.clearAttachments(1, &ca, 1, &cr);
+#endif
+
                 cmd_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, graphics_pipeline.pipeline.get());
-                cmd_buffer.bindDescriptorSets(
-                    vk::PipelineBindPoint::eGraphics,
+
+                graphics_pipeline.push_constants.mvp =
+                    glm::perspective(80.0f, window.get_width() / float(window.get_height()), 0.1f, 1000.0f)
+                    * glm::lookAt(glm::vec3(880, 100, -800), glm::vec3(880 - 10, 100, -800), glm::vec3(0, 1, 0));
+
+                cmd_buffer.pushConstants<GraphicsPipeline::PushConstants>(
                     graphics_pipeline.layout.get(),
+                    vk::ShaderStageFlagBits::eVertex,
                     0,
-                    graphics_pipeline.ds.get(),
-                    {});
+                    graphics_pipeline.push_constants);
 
 
                 // TODO: not actually dynamic state -- we recreate this pipeline when extent changes anyway.
@@ -354,8 +475,13 @@ int main()
                         0, 0, static_cast<float>(window.get_width()), static_cast<float>(window.get_height()), 0, 1));
                 cmd_buffer.setScissor(0, vk::Rect2D({0, 0}, window.get_extent()));
 
+                cmd_buffer.bindIndexBuffer(index_buffer, 0, vk::IndexType::eUint32);
+                std::array<vk::Buffer, 1> vbs = {vertex_buffer};
+                std::array<vk::DeviceSize, 1> offsets = {0};
+                cmd_buffer.bindVertexBuffers(0, 1, vbs.data(), offsets.data());
 
-                cmd_buffer.draw(3, 1, 0, 0);
+                // cmd_buffer.draw(3, 1, 0, 0);
+                cmd_buffer.drawIndexed(indices.size(), 1, 0, 0, 0);
 
                 cmd_buffer.endRenderPass();
             }

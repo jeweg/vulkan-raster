@@ -2,7 +2,7 @@
 #include "device.hpp"
 
 #include <iostream>
-
+#include <chrono>
 
 // Note that the swapchain image views cannot be part of
 // this struct because the index to use depends on the
@@ -92,7 +92,9 @@ SwapChain::SwapChain(
             return weight;
         });
 
-    _num_frames_in_flight = 2;
+    std::cerr << "Selected present mode " << to_string(_present_mode) << "\n";
+
+    _num_frames_in_flight = 1;
     // TODO: if (is_android or perhaps is_mobile) { _num_frames_in_flight = 3; }
 
     _extent.setWidth(width);
@@ -139,7 +141,7 @@ void SwapChain::recreate()
 
     auto swapchain_ci = vk::SwapchainCreateInfoKHR{}
                             .setSurface(_surface)
-                            .setMinImageCount(_num_frames_in_flight)
+                            .setMinImageCount(surface_caps.minImageCount)
                             .setImageFormat(_surface_format.format)
                             .setImageColorSpace(_surface_format.colorSpace)
                             .setImageExtent(extent)
@@ -241,6 +243,12 @@ bool SwapChain::FrameImage::is_valid() const
 }
 
 
+uint32_t SwapChain::get_image_count() const
+{
+    return to_uint32(_swapchain_image_views.size());
+}
+
+
 vk::CommandBuffer SwapChain::FrameImage::get_cmd_buffer(Device::Queue queue)
 {
     ASSUME(is_valid());
@@ -305,8 +313,13 @@ SwapChain::FrameImage SwapChain::begin_next_frame()
         fd = _frame_sequence[_current_frame_index].get();
 
         try {
+            auto t0 = std::chrono::high_resolution_clock::now();
             swapchain_image_index = _device.get().acquireNextImageKHR(
                 _swapchain.get(), -1, fd->image_available_for_rendering_sema.get(), {});
+            auto dtime =
+                std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - t0)
+                    .count();
+            // std::cout << "acquire: " << dtime << "\n";
         } catch (const vk::OutOfDateKHRError &) {
             // Loop around, recreate swapchain.
             _recreate_on_begin_next_frame = true;
@@ -338,20 +351,24 @@ void SwapChain::end_current_frame(FrameImage &frame_image)
     fd.command_buffer->end();
 
     vk::PipelineStageFlags dst_stage_mask = vk::PipelineStageFlagBits::eColorAttachmentOutput;
-    auto submit_info =
-        vk::SubmitInfo{}
-            .setCommandBuffers(fd.command_buffer.get())
-            .setWaitSemaphores(fd.image_available_for_rendering_sema.get())
-            .setSignalSemaphores(fd.rendering_finished_sema.get())
-            .setWaitDstStageMask(dst_stage_mask);
+    auto submit_info = vk::SubmitInfo{}
+                           .setCommandBuffers(fd.command_buffer.get())
+                           .setWaitSemaphores(fd.image_available_for_rendering_sema.get())
+                           .setSignalSemaphores(fd.rendering_finished_sema.get())
+                           .setWaitDstStageMask(dst_stage_mask);
     _device.get_queue(Device::Queue::Graphics).submit({submit_info}, fd.finished_fence.get());
 
     try {
+        auto t0 = std::chrono::high_resolution_clock::now();
         _device.get_queue(Device::Queue::Present)
             .presentKHR(vk::PresentInfoKHR{}
                             .setWaitSemaphores(fd.rendering_finished_sema.get())
                             .setSwapchains(_swapchain.get())
                             .setImageIndices(frame_image._swapchain_image_index));
+        auto dtime =
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - t0)
+                .count();
+        // std::cout << "present: " << dtime << "\n";
     } catch (const vk::OutOfDateKHRError &) {
         // Swapchain got invalidated.
         _recreate_on_begin_next_frame = true;
