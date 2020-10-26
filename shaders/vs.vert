@@ -13,6 +13,6 @@ layout(push_constant) uniform PushConstantBlock
 void main()
 {
     gl_Position = PushConstants.mvp * vec4(in_pos, 1.0);
-    out_color = vec3(sin(gl_VertexIndex), sin(gl_VertexIndex * 7.31 + 2.7), sin(gl_VertexIndex * 19.3 + 4)) * 0.5 + 0.5;
+    out_color = vec3(sin(gl_VertexIndex), sin(gl_VertexIndex * 7.31 + 2.7), sin(gl_VertexIndex * 19.3 + 4)) * 0.4 + 0.4;
 }
 

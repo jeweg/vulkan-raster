@@ -34,7 +34,10 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debug_utils_callback(
     std::cerr << "[" << vk::to_string(static_cast<vk::DebugUtilsMessageSeverityFlagBitsEXT>(message_severity)) << "]"
               << "(" << vk::to_string(static_cast<vk::DebugUtilsMessageTypeFlagBitsEXT>(message_types)) << ") "
               << pCallbackData->pMessage << "\n";
-    if (message_severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) { debug_break(); }
+    if (message_severity
+        & (VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)) {
+        debug_break();
+    }
     return VK_TRUE;
 }
 
@@ -164,7 +167,7 @@ int main()
                 .setMessageSeverity(
                     vk::DebugUtilsMessageSeverityFlagBitsEXT::eWarning
                     | vk::DebugUtilsMessageSeverityFlagBitsEXT::eError
-                    | vk::DebugUtilsMessageSeverityFlagBitsEXT::eVerbose
+                    //| vk::DebugUtilsMessageSeverityFlagBitsEXT::eVerbose
                     | vk::DebugUtilsMessageSeverityFlagBitsEXT::eInfo)
                 .setMessageType(
                     vk::DebugUtilsMessageTypeFlagBitsEXT::eGeneral | vk::DebugUtilsMessageTypeFlagBitsEXT::ePerformance
@@ -208,8 +211,8 @@ int main()
             "VK_KHR_swapchain", "VK_KHR_get_memory_requirements2", "VK_KHR_dedicated_allocation"};
 
         Device device(instance.get(), phys_device, window.get_surface());
-        // window.make_swap_chain(device, true, true);
-        window.make_swap_chain(device, false, false); // Pretty much immediate present
+        window.make_swap_chain(device, true, false);
+        // window.make_swap_chain(device, false, false); // Pretty much immediate present
 
         //----------------------------------------------------------------------
         // Static resources (not dependent on window size)
@@ -270,6 +273,7 @@ int main()
             } push_constants;
 
             VmaImage depth_buffer;
+            vk::UniqueImageView depth_buffer_view;
 
         } graphics_pipeline;
 
@@ -299,23 +303,82 @@ int main()
                         .setUsage(vk::ImageUsageFlagBits::eDepthStencilAttachment)
                         .setSamples(vk::SampleCountFlagBits::e1)
                         .setSharingMode(vk::SharingMode::eExclusive));
+                graphics_pipeline.depth_buffer_view = device.get().createImageViewUnique(
+                    vk::ImageViewCreateInfo{}
+                        .setImage(graphics_pipeline.depth_buffer)
+                        .setFormat(vk::Format::eD24UnormS8Uint)
+                        .setViewType(vk::ImageViewType::e2D)
+                        .setSubresourceRange(vk::ImageSubresourceRange{}
+                                                 .setAspectMask(vk::ImageAspectFlagBits::eDepth)
+                                                 .setBaseMipLevel(0)
+                                                 .setLayerCount(1)
+                                                 .setLevelCount(1)
+                                                 .setBaseArrayLayer(0)));
 
-                graphics_pipeline.render_pass = device.get().createRenderPassUnique(
-                    vk::RenderPassCreateInfo{}
-                        .setAttachments(vk::AttachmentDescription{}
-                                            .setFormat(window.get_swap_chain().get_format())
-                                            .setSamples(vk::SampleCountFlagBits::e1)
-                                            .setLoadOp(vk::AttachmentLoadOp::eClear)
-                                            //.setLoadOp(vk::AttachmentLoadOp::eDontCare)
-                                            .setStoreOp(vk::AttachmentStoreOp::eStore)
-                                            .setStencilLoadOp(vk::AttachmentLoadOp::eDontCare)
-                                            .setStencilStoreOp(vk::AttachmentStoreOp::eDontCare)
-                                            .setInitialLayout(vk::ImageLayout::eUndefined)
-                                            .setFinalLayout(vk::ImageLayout::ePresentSrcKHR))
-                        .setSubpasses(vk::SubpassDescription{}
-                                          .setPipelineBindPoint(vk::PipelineBindPoint::eGraphics)
-                                          .setColorAttachments(vk::AttachmentReference{}.setAttachment(0).setLayout(
-                                              vk::ImageLayout::eColorAttachmentOptimal))));
+                std::array<vk::AttachmentDescription, 2> render_pass_attachments = {
+                    vk::AttachmentDescription{}
+                        .setFormat(window.get_swap_chain().get_format())
+                        .setSamples(vk::SampleCountFlagBits::e1)
+                        .setLoadOp(vk::AttachmentLoadOp::eDontCare)
+                        //.setLoadOp(vk::AttachmentLoadOp::eClear)
+                        .setStoreOp(vk::AttachmentStoreOp::eStore)
+                        .setStencilLoadOp(vk::AttachmentLoadOp::eDontCare)
+                        .setStencilStoreOp(vk::AttachmentStoreOp::eDontCare)
+                        .setInitialLayout(vk::ImageLayout::eUndefined)
+                        //.setInitialLayout(vk::ImageLayout::eColorAttachmentOptimal)
+                        .setFinalLayout(vk::ImageLayout::ePresentSrcKHR),
+                    vk::AttachmentDescription{}
+                        .setFormat(vk::Format::eD24UnormS8Uint) // TODO: richer image class to query this automatically
+                        .setSamples(vk::SampleCountFlagBits::e1)
+                        .setLoadOp(vk::AttachmentLoadOp::eClear)
+                        .setStoreOp(vk::AttachmentStoreOp::eDontCare)
+                        .setStencilLoadOp(vk::AttachmentLoadOp::eDontCare)
+                        .setStencilStoreOp(vk::AttachmentStoreOp::eDontCare)
+                        .setInitialLayout(vk::ImageLayout::eUndefined)
+                        .setFinalLayout(vk::ImageLayout::eDepthStencilAttachmentOptimal)};
+
+
+                auto ar = vk::AttachmentReference{}.setAttachment(1).setLayout(
+                    vk::ImageLayout::eDepthStencilAttachmentOptimal);
+
+                std::array<vk::SubpassDescription, 1> subpass_desc = {
+                    vk::SubpassDescription{}
+                        .setPipelineBindPoint(vk::PipelineBindPoint::eGraphics)
+                        .setColorAttachments(vk::AttachmentReference{}.setAttachment(0).setLayout(
+                            vk::ImageLayout::eColorAttachmentOptimal))
+                        .setPDepthStencilAttachment(&ar)};
+
+                // Barrier around depth buffer usage -- otherwise multiple frames in flight
+                // could access it at the same time. See https://stackoverflow.com/a/62398311
+
+                std::array<vk::SubpassDependency, 2> subpass_deps = {
+                    vk::SubpassDependency{}
+                        .setSrcSubpass(VK_SUBPASS_EXTERNAL)
+                        .setSrcStageMask(
+                            vk::PipelineStageFlagBits::eEarlyFragmentTests
+                            | vk::PipelineStageFlagBits::eLateFragmentTests)
+                        .setSrcAccessMask(vk::AccessFlagBits::eDepthStencilAttachmentWrite)
+                        .setDstSubpass(0)
+                        .setDstStageMask(
+                            vk::PipelineStageFlagBits::eEarlyFragmentTests
+                            | vk::PipelineStageFlagBits::eLateFragmentTests)
+                        .setDstAccessMask(
+                            vk::AccessFlagBits::eDepthStencilAttachmentRead
+                            | vk::AccessFlagBits::eDepthStencilAttachmentWrite),
+                    vk::SubpassDependency{}
+                        .setSrcSubpass(0)
+                        .setSrcStageMask(vk::PipelineStageFlagBits::eAllGraphics)
+                        .setSrcAccessMask(
+                            vk::AccessFlagBits::eColorAttachmentWrite
+                            | vk::AccessFlagBits::eDepthStencilAttachmentWrite)
+                        .setDstSubpass(VK_SUBPASS_EXTERNAL)
+                        .setDstStageMask(vk::PipelineStageFlagBits::eBottomOfPipe)};
+
+                graphics_pipeline.render_pass =
+                    device.get().createRenderPassUnique(vk::RenderPassCreateInfo{}
+                                                            .setAttachments(render_pass_attachments)
+                                                            .setSubpasses(subpass_desc)
+                                                            .setDependencies(subpass_deps));
 
                 std::vector<vk::PipelineShaderStageCreateInfo> shader_stages = {
                     vk::PipelineShaderStageCreateInfo{}
@@ -365,10 +428,11 @@ int main()
                 auto multisample_state = vk::PipelineMultisampleStateCreateInfo{}
                                              .setRasterizationSamples(vk::SampleCountFlagBits::e1)
                                              .setSampleShadingEnable(false);
-                auto depth_stencil_state = vk::PipelineDepthStencilStateCreateInfo{} //.setDepthTestEnable(true)
-                                                                                     //.setDepthWriteEnable(true)
-                                               .setDepthTestEnable(false) // HACK
-                                               .setDepthWriteEnable(false) // HACK
+                auto depth_stencil_state = vk::PipelineDepthStencilStateCreateInfo{}
+                                               .setDepthTestEnable(true)
+                                               .setDepthWriteEnable(true)
+                                               //.setDepthTestEnable(false) // HACK
+                                               //.setDepthWriteEnable(false) // HACK
                                                .setDepthCompareOp(vk::CompareOp::eLessOrEqual)
                                                .setBack(vk::StencilOpState{}
                                                             .setFailOp(vk::StencilOp::eKeep)
@@ -432,20 +496,23 @@ int main()
                 fb_key.render_pass = graphics_pipeline.render_pass.get();
                 fb_key.extent = window.get_extent();
                 fb_key.attachments.push_back(frame.get_image_view());
+                fb_key.attachments.push_back(graphics_pipeline.depth_buffer_view.get());
+
+                std::array<vk::ClearValue, 2> clear_values = {
+                    vk::ClearValue{}.setColor(vk::ClearColorValue{}.setFloat32({0.5, 1, 0, 1})),
+                    vk::ClearValue{}.setDepthStencil(vk::ClearDepthStencilValue{}.setDepth((1.0)))};
 
                 vk::CommandBuffer cmd_buffer = frame.get_cmd_buffer(Device::Queue::Graphics);
                 cmd_buffer.beginRenderPass(
                     vk::RenderPassBeginInfo{}
                         .setRenderPass(graphics_pipeline.render_pass.get())
                         .setRenderArea(vk::Rect2D({0, 0}, window.get_extent()))
-                        .setClearValues(vk::ClearValue{}
-                                            .setColor(vk::ClearColorValue{}.setFloat32({0.5, 1, 0, 1}))
-                                            .setDepthStencil(vk::ClearDepthStencilValue{}.setDepth((1.0))))
+                        .setClearValues(clear_values)
                         .setFramebuffer(device.get_framebuffer(fb_key)),
                     vk::SubpassContents::eInline);
 
 #if 0
-                // We do this as part of the render pass begin, but here is manual clearing for completeness.
+            // We do this as part of the render pass begin, but here is manual clearing for completeness.
                 auto ca = vk::ClearAttachment{}
                               .setClearValue(vk::ClearValue{}.setColor(vk::ClearColorValue{}.setFloat32({0, 0, 1, 1})))
                               .setColorAttachment(0)
@@ -459,14 +526,13 @@ int main()
 
                 graphics_pipeline.push_constants.mvp =
                     glm::perspective(80.0f, window.get_width() / float(window.get_height()), 0.1f, 1000.0f)
-                    * glm::lookAt(glm::vec3(880, 100, -800), glm::vec3(880 - 10, 100, -800), glm::vec3(0, 1, 0));
+                    * glm::lookAt(glm::vec3(880, 100, -100), glm::vec3(880 - 10, 100, -100), glm::vec3(0, 1, 0));
 
                 cmd_buffer.pushConstants<GraphicsPipeline::PushConstants>(
                     graphics_pipeline.layout.get(),
                     vk::ShaderStageFlagBits::eVertex,
                     0,
                     graphics_pipeline.push_constants);
-
 
                 // TODO: not actually dynamic state -- we recreate this pipeline when extent changes anyway.
                 cmd_buffer.setViewport(
@@ -481,7 +547,7 @@ int main()
                 cmd_buffer.bindVertexBuffers(0, 1, vbs.data(), offsets.data());
 
                 // cmd_buffer.draw(3, 1, 0, 0);
-                cmd_buffer.drawIndexed(indices.size(), 1, 0, 0, 0);
+                cmd_buffer.drawIndexed(to_uint32(indices.size()), 1, 0, 0, 0);
 
                 cmd_buffer.endRenderPass();
             }
@@ -504,44 +570,3 @@ int main()
 
     return 0;
 }
-
-
-#if 0
-
-        auto t0 = std::chrono::high_resolution_clock::now();
-
-        const char *inputfile = "C:/Users/jensw/Downloads/Interior/interior.obj";
-        const char *mtl_basedir = "C:/Users/jensw/Downloads/Interior/";
-        tinyobj::attrib_t attrib;
-        std::vector<tinyobj::shape_t> shapes;
-        std::vector<tinyobj::material_t> materials;
-        std::string warn;
-        std::string err;
-        constexpr bool triangulate = true;
-        bool ret = tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, inputfile, mtl_basedir, triangulate);
-
-        if (!warn.empty()) { std::cerr << "Warning: " << warn << "\n"; }
-        if (!err.empty()) { std::cerr << "Error: " << warn << "\n"; }
-        if (!ret) { return -1; }
-
-        auto t1 = std::chrono::high_resolution_clock::now();
-        std::cout << "Success! That took " << std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count()
-                  << " us\n";
-
-
-        std::cout << shapes.size() << "\n";
-        std::cout << materials.size() << "\n";
-
-        size_t nl = 0;
-        size_t np = 0;
-        size_t nv = 0;
-        size_t onv = 0;
-        for (auto &shape : shapes) {
-            nl = std::max(shape.lines.num_line_vertices.size(), nl);
-            np = std::max(shape.points.indices.size(), np);
-            nv = std::max(shape.mesh.num_face_vertices.size(), nv);
-            onv += shape.mesh.num_face_vertices.size();
-        }
-
-        auto &shape = shapes[0];
-#endif
