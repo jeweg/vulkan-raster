@@ -1,0 +1,18 @@
+[submodule "3rd-party/glfw"]
+	path = 3rd-party/glfw
+	url = https://github.com/glfw/glfw.git
+[submodule "3rd-party/vma"]
+	path = 3rd-party/vma
+	url = https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
+[submodule "3rd-party/debugbreak"]
+	path = 3rd-party/debugbreak
+	url = https://github.com/scottt/debugbreak.git
+[submodule "3rd-party/imgui"]
+	path = 3rd-party/imgui
+	url = https://github.com/ocornut/imgui.git
+[submodule "3rd-party/tinyobjloader"]
+	path = 3rd-party/tinyobjloader
+	url = https://github.com/tinyobjloader/tinyobjloader.git
+[submodule "3rd-party/glm"]
+	path = 3rd-party/glm
+	url = https://github.com/g-truc/glm.git
