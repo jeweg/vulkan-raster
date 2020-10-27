@@ -48,6 +48,68 @@ void glfwErrorCallback(int error, const char *description)
 }
 
 
+// Collect out into unified vertices so we have a single vertex index into
+// the (non-interleaved) attribute arrays.
+struct IndexKey
+{
+    int vi, ni, ti;
+    explicit IndexKey(int vi, int ni = 0, int ti = 0) : vi(vi), ni(vi), ti(ti) {}
+    friend bool operator==(const IndexKey &a, const IndexKey &b)
+    {
+        return a.vi == b.vi && a.ni == b.ni && a.ti == b.ti;
+    }
+};
+namespace std {
+template <>
+struct hash<IndexKey>
+{
+    std::size_t operator()(IndexKey const &k) const noexcept { return k.vi ^ (k.ni << 2) ^ (k.ti << 4); }
+};
+}
+
+
+class Staging
+{
+public:
+    explicit Staging(Device &device, size_t size_in_mib = 10) : _device(device), _staging_buffer_size_mib(size_in_mib)
+    {}
+
+    void copy(void *src_ptr, size_t src_bytes, VkBuffer dst_buffer, vk::DeviceSize dst_offset = 0)
+    {
+        const size_t batch_size = _staging_buffer_size_mib * 1024u * 1024u;
+        if (!_staging_buffer.buffer) {
+            _staging_buffer = std::move(VmaBuffer(
+                _device.get_vma_allocator(),
+                VmaMemoryUsage::VMA_MEMORY_USAGE_CPU_TO_GPU,
+                true,
+                vk::BufferCreateInfo{}
+                    .setUsage(vk::BufferUsageFlagBits::eTransferSrc)
+                    .setSharingMode(vk::SharingMode::eExclusive)
+                    .setSize(batch_size)));
+        }
+        const int batch_count = static_cast<int>(std::ceil(src_bytes / static_cast<float>(batch_size)));
+        for (int i = 0; i < batch_count; ++i) {
+            char *this_batch_src_ptr = static_cast<char *>(src_ptr) + i * batch_size;
+            size_t this_batch_size = batch_size;
+            if (i == batch_count - 1) { this_batch_size = src_bytes - i * batch_size; }
+
+            std::memcpy(_staging_buffer.mapped_data(), this_batch_src_ptr, this_batch_size);
+
+            _device.run_commands(Device::Queue::AsyncTransfer, [&](vk::CommandBuffer cmdbuf) {
+                auto copy =
+                    vk::BufferCopy{}.setSrcOffset(0).setDstOffset(dst_offset + i * batch_size).setSize(this_batch_size);
+                cmdbuf.copyBuffer(_staging_buffer, dst_buffer, 1, &copy);
+            });
+        }
+    }
+
+private:
+    Device &_device;
+    size_t _staging_buffer_size_mib;
+    VmaBuffer _staging_buffer;
+};
+
+
 int main()
 {
     auto t0 = std::chrono::high_resolution_clock::now();
@@ -85,36 +147,37 @@ int main()
         onv += shape.mesh.num_face_vertices.size();
     }
 
-    struct Vertex
-    {
-        glm::vec3 pos;
-    };
+    std::vector<glm::vec3> vertex_positions;
+    std::vector<glm::vec3> vertex_normals;
+    std::vector<glm::vec2> vertex_texcoords;
+    std::vector<uint32_t> vertex_indices;
 
-    std::vector<Vertex> vertices;
-    vertices.resize(10000);
-    uint32_t max_vi = 0;
-    std::vector<uint32_t> indices;
-    glm::vec3 vertices_bbox_min(std::numeric_limits<float>::max());
-    glm::vec3 vertices_bbox_max(std::numeric_limits<float>::lowest());
-    indices.reserve(vertices.size() * 3);
+    // index combination -> unified vertex index
+    std::unordered_map<IndexKey, int> vi_mapping;
     for (const auto &shape : shapes) {
         for (const auto &i : shape.mesh.indices) {
-            uint32_t vi = i.vertex_index;
-            indices.push_back(vi);
-            Vertex vertex;
-            vertex.pos =
-                glm::vec3(attrib.vertices[vi * 3 + 0], attrib.vertices[vi * 3 + 1], attrib.vertices[vi * 3 + 2]);
-
-            vertices_bbox_min = glm::min(vertices_bbox_min, vertex.pos);
-            vertices_bbox_max = glm::max(vertices_bbox_min, vertex.pos);
-
-            if (vi >= vertices.size()) { vertices.resize(vertices.size() * 3 / 2); }
-            max_vi = std::max(max_vi, vi);
-            vertices[vi] = std::move(vertex);
+            IndexKey key(i.vertex_index, i.normal_index, i.texcoord_index);
+            auto iter = vi_mapping.find(key);
+            int unified_vi;
+            if (iter == vi_mapping.end()) {
+                unified_vi = vertex_positions.size();
+                vi_mapping[key] = unified_vi;
+                vertex_positions.emplace_back(
+                    attrib.vertices[i.vertex_index * 3 + 0],
+                    attrib.vertices[i.vertex_index * 3 + 1],
+                    attrib.vertices[i.vertex_index * 3 + 2]);
+                vertex_normals.emplace_back(
+                    attrib.normals[i.normal_index * 3 + 0],
+                    attrib.normals[i.normal_index * 3 + 1],
+                    attrib.normals[i.normal_index * 3 + 2]);
+                vertex_texcoords.emplace_back(
+                    attrib.texcoords[i.texcoord_index * 2 + 0], attrib.texcoords[i.texcoord_index * 2 + 1]);
+            } else {
+                unified_vi = iter->second;
+            }
+            vertex_indices.push_back(unified_vi);
         }
     }
-    vertices.resize(max_vi + 1);
-
 
     try {
         //----------------------------------------------------------------------
@@ -144,7 +207,7 @@ int main()
             instance_extensions.push_back("VK_KHR_xlib_surface");
         }
 #else
-#    error Currently unsupported platform!
+#    error This platform is not yet supported
 #endif
 
         uint32_t glfw_exts_count = 0;
@@ -235,7 +298,7 @@ int main()
             load_shader(device.get(), std::string(build_info::PROJECT_BINARY_DIR) + "/shaders/fs.frag.spirv");
 
         //----------------------------------------------------------------------
-        // Vertex and index buffer
+        // Vertex and index buffers
 
         VmaBuffer vertex_buffer = std::move(VmaBuffer(
             device.get_vma_allocator(),
@@ -244,7 +307,9 @@ int main()
             vk::BufferCreateInfo{}
                 .setUsage(vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eTransferDst)
                 .setSharingMode(vk::SharingMode::eExclusive)
-                .setSize(vertices.size() * sizeof(Vertex))));
+                .setSize(
+                    vertex_positions.size() * sizeof(glm::vec3) + vertex_normals.size() * sizeof(glm::vec3)
+                    + vertex_texcoords.size() * sizeof(glm::vec2))));
 
         VmaBuffer index_buffer = std::move(VmaBuffer(
             device.get_vma_allocator(),
@@ -253,33 +318,15 @@ int main()
             vk::BufferCreateInfo{}
                 .setUsage(vk::BufferUsageFlagBits::eIndexBuffer | vk::BufferUsageFlagBits::eTransferDst)
                 .setSharingMode(vk::SharingMode::eExclusive)
-                .setSize(indices.size() * sizeof(uint32_t))));
+                .setSize(vertex_indices.size() * sizeof(uint32_t))));
 
         //----------------------------------------------------------------------
         // Upload to vertex and index buffers
 
         {
-            const size_t vertex_bytes = vertices.size() * sizeof(Vertex);
-            const size_t index_bytes = indices.size() * sizeof(uint32_t);
-
-            VmaBuffer staging_buffer = std::move(VmaBuffer(
-                device.get_vma_allocator(),
-                VmaMemoryUsage::VMA_MEMORY_USAGE_CPU_TO_GPU,
-                true, // Automatically persistently mapped
-                vk::BufferCreateInfo{}
-                    .setUsage(vk::BufferUsageFlagBits::eTransferSrc)
-                    .setSharingMode(vk::SharingMode::eExclusive)
-                    .setSize(vertex_bytes + index_bytes)));
-            std::memcpy(static_cast<char *>(staging_buffer.mapped_data()) + 0, vertices.data(), vertex_bytes);
-            std::memcpy(static_cast<char *>(staging_buffer.mapped_data()) + vertex_bytes, indices.data(), index_bytes);
-
-            device.run_commands(Device::Queue::AsyncTransfer, [&](vk::CommandBuffer cmdbuf) {
-                std::array<vk::BufferCopy, 2> copies = {
-                    vk::BufferCopy{}.setSrcOffset(0).setDstOffset(0).setSize(vertex_bytes),
-                    vk::BufferCopy{}.setSrcOffset(vertex_bytes).setDstOffset(0).setSize(index_bytes)};
-                cmdbuf.copyBuffer(staging_buffer, vertex_buffer, 1, &copies[0]);
-                cmdbuf.copyBuffer(staging_buffer, index_buffer, 1, &copies[1]);
-            });
+            Staging staging(device);
+            staging.copy(vertex_positions.data(), vertex_positions.size() * sizeof(glm::vec3), vertex_buffer.buffer, 0);
+            staging.copy(vertex_indices.data(), vertex_indices.size() * sizeof(uint32_t), index_buffer.buffer, 0);
         }
 
         //----------------------------------------------------------------------
@@ -417,14 +464,14 @@ int main()
 
                 auto vibd = vk::VertexInputBindingDescription{}
                                 .setBinding(0)
-                                .setStride(sizeof(Vertex))
+                                .setStride(sizeof(glm::vec3))
                                 .setInputRate(vk::VertexInputRate::eVertex);
 
                 auto viad = vk::VertexInputAttributeDescription{}
                                 .setBinding(0)
                                 .setLocation(0)
                                 .setFormat(vk::Format::eR32G32B32Sfloat)
-                                .setOffset(offsetof(Vertex, pos));
+                                .setOffset(0);
 
                 auto vertex_input_state = vk::PipelineVertexInputStateCreateInfo{}
                                               .setVertexBindingDescriptions({1, &vibd})
@@ -572,7 +619,7 @@ int main()
                 cmd_buffer.bindVertexBuffers(0, 1, vbs.data(), offsets.data());
 
                 // cmd_buffer.draw(3, 1, 0, 0);
-                cmd_buffer.drawIndexed(to_uint32(indices.size()), 1, 0, 0, 0);
+                cmd_buffer.drawIndexed(to_uint32(vertex_indices.size()), 1, 0, 0, 0);
 
                 cmd_buffer.endRenderPass();
             }
