@@ -101,6 +101,7 @@ public:
                 cmdbuf.copyBuffer(_staging_buffer, dst_buffer, 1, &copy);
             });
         }
+        _device.get_device().waitIdle();
     }
 
 private:
@@ -320,12 +321,15 @@ int main()
                 .setSharingMode(vk::SharingMode::eExclusive)
                 .setSize(vertex_indices.size() * sizeof(uint32_t))));
 
-        //----------------------------------------------------------------------
-        // Upload to vertex and index buffers
-
+        // Upload
         {
-            Staging staging(device);
+            Staging staging(device, 100);
             staging.copy(vertex_positions.data(), vertex_positions.size() * sizeof(glm::vec3), vertex_buffer.buffer, 0);
+            staging.copy(
+                vertex_normals.data(),
+                vertex_normals.size() * sizeof(glm::vec3),
+                vertex_buffer.buffer,
+                vertex_positions.size() * sizeof(glm::vec3));
             staging.copy(vertex_indices.data(), vertex_indices.size() * sizeof(uint32_t), index_buffer.buffer, 0);
         }
 
@@ -462,20 +466,32 @@ int main()
                         .setModule(fragment_shader.get())
                         .setPName("main")};
 
-                auto vibd = vk::VertexInputBindingDescription{}
-                                .setBinding(0)
-                                .setStride(sizeof(glm::vec3))
-                                .setInputRate(vk::VertexInputRate::eVertex);
 
-                auto viad = vk::VertexInputAttributeDescription{}
-                                .setBinding(0)
-                                .setLocation(0)
-                                .setFormat(vk::Format::eR32G32B32Sfloat)
-                                .setOffset(0);
+                std::array<vk::VertexInputBindingDescription, 2> vibds = {
+                    vk::VertexInputBindingDescription{}
+                        .setBinding(0)
+                        .setStride(sizeof(glm::vec3))
+                        .setInputRate(vk::VertexInputRate::eVertex),
+                    vk::VertexInputBindingDescription{}
+                        .setBinding(1)
+                        .setStride(sizeof(glm::vec3))
+                        .setInputRate(vk::VertexInputRate::eVertex)};
+
+                std::array<vk::VertexInputAttributeDescription, 2> viads = {
+                    vk::VertexInputAttributeDescription{}
+                        .setBinding(0)
+                        .setLocation(0)
+                        .setFormat(vk::Format::eR32G32B32Sfloat)
+                        .setOffset(0),
+                    vk::VertexInputAttributeDescription{}
+                        .setBinding(1)
+                        .setLocation(1)
+                        .setFormat(vk::Format::eR32G32B32Sfloat)
+                        .setOffset(0)};
 
                 auto vertex_input_state = vk::PipelineVertexInputStateCreateInfo{}
-                                              .setVertexBindingDescriptions({1, &vibd})
-                                              .setVertexAttributeDescriptions({1, &viad});
+                                              .setVertexBindingDescriptions(vibds)
+                                              .setVertexAttributeDescriptions(viads);
 
                 auto input_assembly_state = vk::PipelineInputAssemblyStateCreateInfo{}
                                                 .setTopology(vk::PrimitiveTopology::eTriangleList)
@@ -614,11 +630,13 @@ int main()
                 cmd_buffer.setScissor(0, vk::Rect2D({0, 0}, window.get_extent()));
 
                 cmd_buffer.bindIndexBuffer(index_buffer, 0, vk::IndexType::eUint32);
-                std::array<vk::Buffer, 1> vbs = {vertex_buffer};
-                std::array<vk::DeviceSize, 1> offsets = {0};
-                cmd_buffer.bindVertexBuffers(0, 1, vbs.data(), offsets.data());
 
-                // cmd_buffer.draw(3, 1, 0, 0);
+                {
+                    std::array<vk::Buffer, 2> vbs = {vertex_buffer, vertex_buffer};
+                    std::array<vk::DeviceSize, 2> offsets = {0, vertex_positions.size() * sizeof(glm::vec3)};
+                    cmd_buffer.bindVertexBuffers(0, vbs, offsets);
+                }
+
                 cmd_buffer.drawIndexed(to_uint32(vertex_indices.size()), 1, 0, 0, 0);
 
                 cmd_buffer.endRenderPass();
